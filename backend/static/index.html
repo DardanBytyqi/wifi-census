@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wifi-census</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 1rem; }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
+  h1 { font-size: 1.1rem; margin: 0; }
+  h3 { margin: 1.2rem 0 0.3rem; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 0.5rem; }
+  td, th { border: 1px solid #444; padding: 4px 8px; text-align: left; }
+  th { background: #1a1a1a; }
+  .rand { color: #e55; }
+  #scan-control { display: flex; gap: 0.4rem; align-items: center; font-size: 0.9rem; }
+  #scan-control select, #scan-control button {
+    background: #1a1a1a; color: #eee; border: 1px solid #444; padding: 2px 6px; font-family: monospace;
+  }
+  #scan-status { color: #888; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>wifi-census</h1>
+  <div id="scan-control">
+    <select id="scan-mode">
+      <option value="hop">Hopping</option>
+      <option value="fixed">Fixed channel</option>
+    </select>
+    <select id="scan-channel" disabled></select>
+    <button id="scan-apply">Apply</button>
+    <span id="scan-status"></span>
+  </div>
+</header>
+<div id="out">loading...</div>
+<script>
+const channelSelect = document.getElementById('scan-channel');
+for (let ch = 1; ch <= 13; ch++) {
+  const opt = document.createElement('option');
+  opt.value = ch;
+  opt.textContent = `channel ${ch}`;
+  channelSelect.appendChild(opt);
+}
+
+const modeSelect = document.getElementById('scan-mode');
+modeSelect.addEventListener('change', () => {
+  channelSelect.disabled = modeSelect.value !== 'fixed';
+});
+
+document.getElementById('scan-apply').addEventListener('click', async () => {
+  const status = document.getElementById('scan-status');
+  const body = modeSelect.value === 'fixed'
+    ? { mode: 'fixed', channel: Number(channelSelect.value) }
+    : { mode: 'hop' };
+  try {
+    const res = await fetch('/api/mode', { method: 'POST', body: JSON.stringify(body) });
+    status.textContent = res.ok ? 'applied' : 'error';
+  } catch {
+    status.textContent = 'error';
+  }
+  setTimeout(() => { status.textContent = ''; }, 2000);
+});
+
+async function tick() {
+  const res = await fetch('/api/state');
+  const aps = await res.json();
+  const out = document.getElementById('out');
+  out.innerHTML = '';
+  if (!aps || aps.length === 0) {
+    out.textContent = 'no access points seen yet';
+    return;
+  }
+  for (const ap of aps) {
+    const h = document.createElement('h3');
+    h.textContent = `${ap.ssid || '(hidden)'} — ${ap.bssid} · ch${ap.channel} · ${ap.rssi}dBm`;
+    out.appendChild(h);
+
+    const t = document.createElement('table');
+    t.innerHTML = '<tr><th>client mac</th><th>rssi</th><th>source</th><th>randomized</th></tr>';
+    const clients = ap.clients || {};
+    for (const mac in clients) {
+      const c = clients[mac];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${c.mac}</td><td>${c.rssi}</td><td>${c.source}</td>` +
+        `<td class="${c.randomized ? 'rand' : ''}">${c.randomized}</td>`;
+      t.appendChild(tr);
+    }
+    out.appendChild(t);
+  }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
