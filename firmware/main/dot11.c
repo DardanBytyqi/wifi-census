@@ -1,5 +1,6 @@
 #include "dot11.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #define FC_TYPE(fc) (((fc) >> 2) & 0x3)
@@ -19,39 +20,103 @@
 #define SUBTYPE_BEACON 8
 #define SUBTYPE_AUTH 11
 
-// timestamp(8) + beacon interval(2) + capability info(2), before the IEs
+// timestamp beacon interval capability info
 #define FIXED_FIELDS_LEN 12
 
-// I/G bit of the first octet: set = multicast/broadcast, not a real client
+#define IE_SSID 0
+#define IE_DS_PARAMS 3   // 2.4GHz: 1 byte, current channel
+#define IE_HT_OPERATION 61 // first byte = primary channel, also present on 5GHz
+
 static int is_multicast(const uint8_t *mac) {
     return mac[0] & 0x01;
 }
 
-static void extract_ssid(const uint8_t *body, size_t body_len, char *out, size_t out_cap) {
-    out[0] = '\0';
-    if (body_len <= FIXED_FIELDS_LEN) {
+static void copy_ssid(const uint8_t *src, uint8_t len, char *out, size_t out_cap) {
+    if (len >= out_cap) {
+        len = out_cap - 1;
+    }
+    // hidden networks send either length 0 or zero-filled bytes
+    bool all_zero = true;
+    for (uint8_t i = 0; i < len; i++) {
+        if (src[i] != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    if (all_zero) {
+        out[0] = '\0';
         return;
     }
-    const uint8_t *ie = body + FIXED_FIELDS_LEN;
-    size_t ie_len = body_len - FIXED_FIELDS_LEN;
-    if (ie_len < 2 || ie[0] != 0x00) { // tag 0 = SSID
-        return;
-    }
-    uint8_t ssid_len = ie[1];
-    if (ssid_len > ie_len - 2) {
-        ssid_len = ie_len - 2;
-    }
-    if (ssid_len >= out_cap) {
-        ssid_len = out_cap - 1;
-    }
-    memcpy(out, ie + 2, ssid_len);
-    out[ssid_len] = '\0';
-    // hidden networks send junk/empty SSIDs, strip non-printable chars
-    for (uint8_t i = 0; i < ssid_len; i++) {
-        if (out[i] < 0x20 || out[i] > 0x7e) {
+    memcpy(out, src, len);
+    out[len] = '\0';
+    // tabs/newlines would break the line protocol
+    for (uint8_t i = 0; i < len; i++) {
+        if ((uint8_t)out[i] < 0x20 || out[i] == 0x7f) {
             out[i] = '?';
         }
     }
+}
+
+static void parse_ies(const uint8_t *body, size_t body_len, dot11_event_t *out) {
+    if (body_len <= FIXED_FIELDS_LEN) {
+        return;
+    }
+    const uint8_t *p = body + FIXED_FIELDS_LEN;
+    const uint8_t *end = body + body_len;
+    uint8_t ht_channel = 0;
+
+    while (end - p >= 2) {
+        uint8_t tag = p[0];
+        uint8_t len = p[1];
+        const uint8_t *val = p + 2;
+        if (val + len > end) {
+            if (tag == IE_SSID && p == body + FIXED_FIELDS_LEN) {
+                copy_ssid(val, (uint8_t)(end - val), out->ssid, sizeof(out->ssid));
+            }
+            break;
+        }
+        switch (tag) {
+        case IE_SSID:
+            // the SSID is always the first IE
+            if (p == body + FIXED_FIELDS_LEN) {
+                copy_ssid(val, len, out->ssid, sizeof(out->ssid));
+            }
+            break;
+        case IE_DS_PARAMS:
+            if (len >= 1) {
+                out->ap_channel = val[0];
+            }
+            break;
+        case IE_HT_OPERATION:
+            if (len >= 1) {
+                ht_channel = val[0];
+            }
+            break;
+        }
+        p = val + len;
+    }
+    if (out->ap_channel == 0) {
+        out->ap_channel = ht_channel;
+    }
+}
+
+// auth/assoc go both ways: addr3 is the BSSID, the client is the other address
+static int client_from_mgmt(const dot11_hdr_t *hdr, dot11_event_t *out, const char *detail) {
+    const uint8_t *bssid = hdr->addr3;
+    const uint8_t *client;
+    if (memcmp(hdr->addr2, bssid, 6) == 0) {
+        client = hdr->addr1; // AP -> client
+    } else {
+        client = hdr->addr2; // client -> AP
+    }
+    if (is_multicast(client) || is_multicast(bssid)) {
+        return -1;
+    }
+    out->kind = DOT11_FRAME_CLIENT;
+    memcpy(out->bssid, bssid, 6);
+    memcpy(out->client, client, 6);
+    out->detail = detail;
+    return 0;
 }
 
 int dot11_parse(const uint8_t *frame, size_t len, dot11_event_t *out) {
@@ -72,36 +137,23 @@ int dot11_parse(const uint8_t *frame, size_t len, dot11_event_t *out) {
         switch (subtype) {
         case SUBTYPE_BEACON:
         case SUBTYPE_PROBE_RESP:
+            if (is_multicast(hdr->addr3)) {
+                return -1;
+            }
             out->kind = DOT11_FRAME_AP;
-            memcpy(out->bssid, hdr->addr2, 6);
-            extract_ssid(body, body_len, out->ssid, sizeof(out->ssid));
+            memcpy(out->bssid, hdr->addr3, 6);
+            parse_ies(body, body_len, out);
             out->detail = (subtype == SUBTYPE_BEACON) ? "beacon" : "probe_resp";
             return 0;
 
         case SUBTYPE_ASSOC_REQ:
         case SUBTYPE_REASSOC_REQ:
-        case SUBTYPE_AUTH:
-            // client to AP: addr1 = AP (BSSID), addr2 = client
-            if (is_multicast(hdr->addr2)) {
-                return -1;
-            }
-            out->kind = DOT11_FRAME_CLIENT;
-            memcpy(out->bssid, hdr->addr1, 6);
-            memcpy(out->client, hdr->addr2, 6);
-            out->detail = "assoc";
-            return 0;
-
         case SUBTYPE_ASSOC_RESP:
         case SUBTYPE_REASSOC_RESP:
-            // AP to client: addr1 = client, addr2 = AP (BSSID)
-            if (is_multicast(hdr->addr1)) {
-                return -1;
-            }
-            out->kind = DOT11_FRAME_CLIENT;
-            memcpy(out->bssid, hdr->addr2, 6);
-            memcpy(out->client, hdr->addr1, 6);
-            out->detail = "assoc";
-            return 0;
+            return client_from_mgmt(hdr, out, "assoc");
+
+        case SUBTYPE_AUTH:
+            return client_from_mgmt(hdr, out, "auth");
 
         default:
             return -1;
@@ -113,7 +165,7 @@ int dot11_parse(const uint8_t *frame, size_t len, dot11_event_t *out) {
         uint8_t from_ds = FC_FROM_DS(fc);
 
         if (to_ds && !from_ds) {
-            // station to AP
+            // station to AP: addr1 = BSSID, addr2 = station
             if (is_multicast(hdr->addr2)) {
                 return -1;
             }
@@ -124,7 +176,7 @@ int dot11_parse(const uint8_t *frame, size_t len, dot11_event_t *out) {
             return 0;
         }
         if (!to_ds && from_ds) {
-            // AP to station, skip broadcast/multicast payloads (ARP, mDNS...)
+            // AP to station: addr1 = station, addr2 = BSSID
             if (is_multicast(hdr->addr1)) {
                 return -1;
             }
@@ -134,7 +186,7 @@ int dot11_parse(const uint8_t *frame, size_t len, dot11_event_t *out) {
             out->detail = "data";
             return 0;
         }
-        // ad-hoc or 4-address WDS, not handled
+        // IBSS or 4-address WDS
         return -1;
     }
 
