@@ -16,19 +16,31 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "soc/soc_caps.h"
 
 #include "dot11.h"
 
-static const uint8_t CHANNELS[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+// 5GHz only on dual-band chips (ESP32-C5)
+static const uint8_t CHANNELS[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+#if SOC_WIFI_SUPPORT_5G
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165,
+#endif
+};
 #define NUM_CHANNELS (sizeof(CHANNELS) / sizeof(CHANNELS[0]))
 
-#define HOP_DWELL_MS 300
+// beacon interval is ~102 ms: idle channels get one, active ones two
+#define HOP_DWELL_MS 250
+#define HOP_DWELL_IDLE_MS 110
+#define HOP_FULL_EVERY 4
 #define STAT_PERIOD_MS 5000
 
 static const char *TAG = "sniffer";
 
-// header + SSID IE
-#define SNIFF_COPY_LEN 80
+// enough to reach the HT Operation IE on 5GHz beacons
+#define SNIFF_COPY_LEN 256
 
 typedef struct {
     uint16_t len;
@@ -59,7 +71,9 @@ static void IRAM_ATTR wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t typ
         return;
     }
     const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+    // strip the 4-byte FCS
     uint16_t len = pkt->rx_ctrl.sig_len;
+    len = (len > 4) ? len - 4 : 0;
     if (len > SNIFF_COPY_LEN) {
         len = SNIFF_COPY_LEN;
     }
@@ -106,14 +120,23 @@ static void tune(uint8_t ch) {
 
 static void channel_task(void *arg) {
     size_t idx = 0;
+    uint32_t pass = 0;
     uint8_t parked_on = 0;
+    static bool active[NUM_CHANNELS]; // frames seen on the last visit
 
     while (1) {
         if (s_mode == MODE_HOP) {
             tune(CHANNELS[idx]);
-            idx = (idx + 1) % NUM_CHANNELS;
             parked_on = 0;
-            vTaskDelay(pdMS_TO_TICKS(HOP_DWELL_MS));
+            bool full = active[idx] || (pass % HOP_FULL_EVERY) == 0;
+            uint32_t before = s_rx_frames;
+            vTaskDelay(pdMS_TO_TICKS(full ? HOP_DWELL_MS : HOP_DWELL_IDLE_MS));
+            active[idx] = s_rx_frames != before;
+            idx++;
+            if (idx == NUM_CHANNELS) {
+                idx = 0;
+                pass++;
+            }
         } else {
             uint8_t target = s_fixed_channel;
             if (target != parked_on) {
@@ -193,7 +216,11 @@ static void parser_task(void *arg) {
         mac_to_str(ev.bssid, bssid_str);
 
         if (ev.kind == DOT11_FRAME_AP) {
-            printf("AP\t%s\t%s\t%d\t%d\n", bssid_str, ev.ssid, frame.channel, frame.rssi);
+            // an advertised channel in the other band is bogus
+            if ((ev.ap_channel > 14) != (frame.channel > 14)) {
+                ev.ap_channel = 0;
+            }
+            printf("AP\t%s\t%s\t%d\t%d\t%d\n", bssid_str, ev.ssid, frame.channel, frame.rssi, ev.ap_channel);
         } else if (ev.kind == DOT11_FRAME_CLIENT) {
             mac_to_str(ev.client, client_str);
             printf("CLI\t%s\t%s\t%d\t%d\t%s\n", bssid_str, client_str, frame.channel, frame.rssi, ev.detail);
@@ -221,6 +248,9 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
+#if SOC_WIFI_SUPPORT_5G
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO));
+#endif
     ESP_ERROR_CHECK(esp_wifi_set_channel(s_current_channel, WIFI_SECOND_CHAN_NONE));
 
     wifi_promiscuous_filter_t filter = {
@@ -235,5 +265,5 @@ void app_main(void) {
     xTaskCreate(stat_task, "stat_task", 4096, NULL, 1, NULL);
 
     print_hello();
-    ESP_LOGI(TAG, "hopping %d channels, dwell %d ms", (int)NUM_CHANNELS, HOP_DWELL_MS);
+    ESP_LOGI(TAG, "hopping %d channels, dwell %d/%d ms", (int)NUM_CHANNELS, HOP_DWELL_MS, HOP_DWELL_IDLE_MS);
 }
