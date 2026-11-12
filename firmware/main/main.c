@@ -194,6 +194,43 @@ static void stat_task(void *arg) {
     }
 }
 
+// at most one data line per (bssid, client) every CLI_DEDUP_MS, carrying the frame count
+#define CLI_DEDUP_MS 1000
+#define CLI_CACHE_SIZE 128
+
+typedef struct {
+    uint8_t key[12]; // bssid, client
+    TickType_t last_print;
+    uint32_t pending; // frames suppressed since last_print
+} cli_entry_t;
+
+static cli_entry_t s_cli_cache[CLI_CACHE_SIZE];
+
+// 0 = suppress, otherwise the frame count to print
+static uint32_t cli_should_print(const dot11_event_t *ev) {
+    uint8_t key[12];
+    memcpy(key, ev->bssid, 6);
+    memcpy(key + 6, ev->client, 6);
+    uint32_t h = 2166136261u; // FNV-1a
+    for (int i = 0; i < 12; i++) {
+        h = (h ^ key[i]) * 16777619u;
+    }
+    cli_entry_t *e = &s_cli_cache[h % CLI_CACHE_SIZE];
+    TickType_t now = xTaskGetTickCount();
+    bool is_data = strcmp(ev->detail, "data") == 0;
+
+    if (memcmp(e->key, key, 12) == 0 && is_data &&
+        (now - e->last_print) < pdMS_TO_TICKS(CLI_DEDUP_MS)) {
+        e->pending++;
+        return 0;
+    }
+    uint32_t count = (memcmp(e->key, key, 12) == 0) ? e->pending + 1 : 1;
+    memcpy(e->key, key, 12);
+    e->last_print = now;
+    e->pending = 0;
+    return count;
+}
+
 static void mac_to_str(const uint8_t *mac, char *out) {
     snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -222,8 +259,13 @@ static void parser_task(void *arg) {
             }
             printf("AP\t%s\t%s\t%d\t%d\t%d\n", bssid_str, ev.ssid, frame.channel, frame.rssi, ev.ap_channel);
         } else if (ev.kind == DOT11_FRAME_CLIENT) {
+            uint32_t count = cli_should_print(&ev);
+            if (count == 0) {
+                continue;
+            }
             mac_to_str(ev.client, client_str);
-            printf("CLI\t%s\t%s\t%d\t%d\t%s\n", bssid_str, client_str, frame.channel, frame.rssi, ev.detail);
+            printf("CLI\t%s\t%s\t%d\t%d\t%s\t%lu\n", bssid_str, client_str, frame.channel, frame.rssi,
+                   ev.detail, (unsigned long)count);
         }
         s_lines++;
     }
