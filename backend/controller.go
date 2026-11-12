@@ -7,7 +7,7 @@ import (
 	"go.bug.st/serial"
 )
 
-// lets the dashboard push commands down the same serial port we read from
+// Controller writes commands to the connected nodes' serial ports.
 type Controller struct {
 	mu    sync.Mutex
 	ports map[string]serial.Port
@@ -29,7 +29,7 @@ func (c *Controller) unregister(name string) {
 	delete(c.ports, name)
 }
 
-// cmd must end in "\n"
+// Broadcast sends cmd (newline-terminated) to every node.
 func (c *Controller) Broadcast(cmd string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

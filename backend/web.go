@@ -20,6 +20,11 @@ func newServer(store *Store, ctrl *Controller) http.Handler {
 		json.NewEncoder(w).Encode(store.Snapshot())
 	})
 
+	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Nodes())
+	})
+
 	mux.HandleFunc("/api/mode", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -36,8 +41,8 @@ func newServer(store *Store, ctrl *Controller) http.Handler {
 		case "hop":
 			cmd = "HOP\n"
 		case "fixed":
-			if req.Channel < 1 || req.Channel > 13 {
-				http.Error(w, "channel must be 1-13", http.StatusBadRequest)
+			if !store.ChannelSupported(req.Channel) {
+				http.Error(w, fmt.Sprintf("channel %d not supported by any connected node", req.Channel), http.StatusBadRequest)
 				return
 			}
 			cmd = fmt.Sprintf("CH %d\n", req.Channel)
