@@ -22,18 +22,24 @@ type Event struct {
 }
 
 type ClientInfo struct {
-	MAC        string    `json:"mac"`
-	RSSI       int       `json:"rssi"`
-	Source     string    `json:"source"`
-	Randomized bool      `json:"randomized"`
-	LastSeen   time.Time `json:"last_seen"`
+	MAC        string `json:"mac"`
+	RSSI       int    `json:"rssi"`
+	Randomized bool   `json:"randomized"`
+	Frames     int    `json:"frames"`
+	// auth/assoc without data = join attempt with no visible traffic
+	Kinds     []string  `json:"kinds"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 type APInfo struct {
-	BSSID    string                 `json:"bssid"`
-	SSID     string                 `json:"ssid"`
-	Channel  int                    `json:"channel"`
-	RSSI     int                    `json:"rssi"`
+	BSSID   string `json:"bssid"`
+	SSID    string `json:"ssid"`
+	Channel int    `json:"channel"`
+	Band    string `json:"band"`
+	RSSI    int    `json:"rssi"`
+	// false if only seen as the BSSID of client traffic
+	Beaconed bool                   `json:"beaconed"`
 	LastSeen time.Time              `json:"last_seen"`
 	Clients  map[string]*ClientInfo `json:"clients"`
 }
@@ -55,41 +61,112 @@ type Store struct {
 	mu    sync.RWMutex
 	aps   map[string]*APInfo
 	nodes map[string]*NodeInfo
+	now   func() time.Time // injectable for tests
 }
 
 func NewStore() *Store {
-	return &Store{aps: make(map[string]*APInfo), nodes: make(map[string]*NodeInfo)}
+	return &Store{
+		aps:   make(map[string]*APInfo),
+		nodes: make(map[string]*NodeInfo),
+		now:   time.Now,
+	}
+}
+
+func bandOf(ch int) string {
+	switch {
+	case ch >= 1 && ch <= 14:
+		return "2.4GHz"
+	case ch >= 32 && ch <= 177:
+		return "5GHz"
+	default:
+		return ""
+	}
 }
 
 func (s *Store) Apply(ev Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 
 	ap, ok := s.aps[ev.BSSID]
 	if !ok {
 		ap = &APInfo{BSSID: ev.BSSID, Clients: make(map[string]*ClientInfo)}
 		s.aps[ev.BSSID] = ap
 	}
-	ap.Channel = ev.Channel
-	ap.LastSeen = time.Now()
+	ap.LastSeen = now
 
 	switch ev.Type {
 	case "AP":
-		ap.SSID = ev.SSID
+		// some APs alternate real and blank SSIDs
+		if ev.SSID != "" {
+			ap.SSID = ev.SSID
+		}
 		ap.RSSI = ev.RSSI
+		ap.Beaconed = true
+		// 2.4GHz channels overlap: trust the beacon over the radio channel
+		if ev.APChannel > 0 {
+			ap.Channel = ev.APChannel
+		} else if ap.Channel == 0 {
+			ap.Channel = ev.Channel
+		}
 	case "CLI":
+
+		if !ap.Beaconed && ap.Channel == 0 {
+			ap.Channel = ev.Channel
+		}
 		c, ok := ap.Clients[ev.Client]
 		if !ok {
-			c = &ClientInfo{MAC: ev.Client, Randomized: isRandomizedMAC(ev.Client)}
+			c = &ClientInfo{
+				MAC:        ev.Client,
+				Randomized: isRandomizedMAC(ev.Client),
+				FirstSeen:  now,
+			}
 			ap.Clients[ev.Client] = c
 		}
 		c.RSSI = ev.RSSI
-		c.Source = ev.Detail
-		c.LastSeen = time.Now()
+		c.LastSeen = now
+		frames := ev.Frames
+		if frames < 1 {
+			frames = 1
+		}
+		c.Frames += frames
+		if ev.Detail != "" && !contains(c.Kinds, ev.Detail) {
+			c.Kinds = append(c.Kinds, ev.Detail)
+		}
 	}
+	ap.Band = bandOf(ap.Channel)
 }
 
-// copy for JSON encoding, doesn't hold the lock while marshaling
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// Prune drops clients, then empty APs, not seen within ttl.
+func (s *Store) Prune(ttl time.Duration) (aps, clients int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := s.now().Add(-ttl)
+	for bssid, ap := range s.aps {
+		for mac, c := range ap.Clients {
+			if c.LastSeen.Before(cutoff) {
+				delete(ap.Clients, mac)
+				clients++
+			}
+		}
+		if len(ap.Clients) == 0 && ap.LastSeen.Before(cutoff) {
+			delete(s.aps, bssid)
+			aps++
+		}
+	}
+	return aps, clients
+}
+
+// Snapshot returns a deep copy sorted by client count.
 func (s *Store) Snapshot() []*APInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -99,12 +176,27 @@ func (s *Store) Snapshot() []*APInfo {
 		clients := make(map[string]*ClientInfo, len(ap.Clients))
 		for mac, c := range ap.Clients {
 			cp := *c
+			cp.Kinds = append([]string(nil), c.Kinds...)
 			clients[mac] = &cp
 		}
 		apCopy := *ap
 		apCopy.Clients = clients
 		out = append(out, &apCopy)
 	}
+	// ties: beaconed first, then RSSI, then BSSID for a stable order
+	sort.Slice(out, func(i, j int) bool {
+		ci, cj := len(out[i].Clients), len(out[j].Clients)
+		if ci != cj {
+			return ci > cj
+		}
+		if out[i].Beaconed != out[j].Beaconed {
+			return out[i].Beaconed
+		}
+		if out[i].RSSI != out[j].RSSI {
+			return out[i].RSSI > out[j].RSSI
+		}
+		return out[i].BSSID < out[j].BSSID
+	})
 	return out
 }
 
@@ -114,7 +206,7 @@ func (s *Store) node(name string) *NodeInfo {
 		n = &NodeInfo{Name: name}
 		s.nodes[name] = n
 	}
-	n.Updated = time.Now()
+	n.Updated = s.now()
 	return n
 }
 
@@ -180,7 +272,7 @@ func (s *Store) ChannelSupported(ch int) bool {
 	return false
 }
 
-// locally-administered bit set = randomized MAC, not the burned-in one
+// isRandomizedMAC checks the locally-administered bit.
 func isRandomizedMAC(mac string) bool {
 	if len(mac) < 2 {
 		return false
