@@ -23,6 +23,7 @@ type Event struct {
 
 type ClientInfo struct {
 	MAC        string `json:"mac"`
+	Vendor     string `json:"vendor"`
 	RSSI       int    `json:"rssi"`
 	Randomized bool   `json:"randomized"`
 	Frames     int    `json:"frames"`
@@ -34,6 +35,7 @@ type ClientInfo struct {
 
 type APInfo struct {
 	BSSID   string `json:"bssid"`
+	Vendor  string `json:"vendor"`
 	SSID    string `json:"ssid"`
 	Channel int    `json:"channel"`
 	Band    string `json:"band"`
@@ -61,13 +63,15 @@ type Store struct {
 	mu    sync.RWMutex
 	aps   map[string]*APInfo
 	nodes map[string]*NodeInfo
+	oui   OUIDB
 	now   func() time.Time // injectable for tests
 }
 
-func NewStore() *Store {
+func NewStore(oui OUIDB) *Store {
 	return &Store{
 		aps:   make(map[string]*APInfo),
 		nodes: make(map[string]*NodeInfo),
+		oui:   oui,
 		now:   time.Now,
 	}
 }
@@ -90,7 +94,7 @@ func (s *Store) Apply(ev Event) {
 
 	ap, ok := s.aps[ev.BSSID]
 	if !ok {
-		ap = &APInfo{BSSID: ev.BSSID, Clients: make(map[string]*ClientInfo)}
+		ap = &APInfo{BSSID: ev.BSSID, Vendor: s.oui.Lookup(ev.BSSID), Clients: make(map[string]*ClientInfo)}
 		s.aps[ev.BSSID] = ap
 	}
 	ap.LastSeen = now
@@ -118,6 +122,7 @@ func (s *Store) Apply(ev Event) {
 		if !ok {
 			c = &ClientInfo{
 				MAC:        ev.Client,
+				Vendor:     s.oui.Lookup(ev.Client),
 				Randomized: isRandomizedMAC(ev.Client),
 				FirstSeen:  now,
 			}

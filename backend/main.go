@@ -22,13 +22,21 @@ func main() {
 	// localhost by default: the page exposes device MACs and sniffer control
 	addr := flag.String("addr", "127.0.0.1:8080", "dashboard listen address")
 	ttl := flag.Duration("ttl", 30*time.Minute, "forget clients/APs not seen for this long (0 = never)")
+	ouiPath := flag.String("oui", defaultOUIPath(), "IEEE MA-L registry for vendor lookup (https://standards-oui.ieee.org/oui/oui.csv)")
 	flag.Parse()
 
 	nodes := []NodeConfig{
 		{Name: "esp32", Port: *port, Baud: *baud},
 	}
 
-	store := NewStore()
+	oui, err := LoadOUI(*ouiPath)
+	if err != nil {
+		log.Printf("vendor lookup disabled: %v", err)
+	} else {
+		log.Printf("vendor lookup: %d OUIs from %s", len(oui), *ouiPath)
+	}
+
+	store := NewStore(oui)
 	ctrl := NewController()
 	for _, n := range nodes {
 		go runNode(n, store, ctrl)

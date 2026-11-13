@@ -8,7 +8,7 @@ import (
 
 // store with a controllable clock
 func testStore() (*Store, *time.Time) {
-	s := NewStore()
+	s := NewStore(nil)
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	return s, &now
