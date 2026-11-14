@@ -1,53 +1,35 @@
 # wifi-census
 
-Passive wifi sniffer. Shows nearby access points and which client MACs
-are connected to each one (including randomized MACs).
+Passive Wi-Fi census for site surveys: captures 802.11 frames with an ESP32 and correlates client devices with the access points they are connected to, on 2.4GHz and 5GHz (ESP32-C5).
 
-## Setup
+![dashboard](docs/screenshot.png)
 
-ESP32 has one radio, so it hops channels (1, 6, 11 by default, 300ms
-each) and tags every frame it captures with the channel it was on. It
-sends that over USB-serial to a Go backend, which keeps track of
-everything and shows it on a web dashboard.
+## How it works
 
-ESP32, over USB, to a Go backend, to the dashboard.
+The firmware sniffs 802.11 frames in promiscuous mode while hopping channels and sends one line per event over serial. The Go backend aggregates them, adds vendor names from the IEEE OUI registry and serves the dashboard.
 
-Raw packet capture has to be C/ESP-IDF, no Go toolchain does that on a
-microcontroller. Everything after capture (storage, dashboard) is Go.
+## Usage
 
-## Run it
+```sh
+# firmware (ESP-IDF 5.5)
+cd firmware && idf.py set-target esp32c5 build flash
 
-Firmware:
-
-```
-idf.py set-target esp32 && idf.py build flash monitor
+# backend
+go -C backend build && ./backend/backend -port /dev/ttyUSB0
 ```
 
-You should see `AP` and `CLI` lines scrolling. Ctrl+] to quit the
-monitor before starting the backend (only one thing can own the serial
-port).
+Open http://localhost:8080.
 
-Backend:
+## Tests
 
-```
-cd backend
-go run .
+```sh
+cc -I firmware/main firmware/test/test_dot11.c firmware/main/dot11.c -o /tmp/t && /tmp/t
+go -C backend test ./...
 ```
 
-Set your serial port first in `nodes` inside `backend/main.go`. Then
-open `http://localhost:8080`. There's a toggle top-right for
-hopping / fixed channel.
+## Limitations
 
-## Known limits
+- 5GHz needs an ESP32-C5; other ESP32 chips are 2.4GHz only.
+- Single antenna, 20MHz: devices on wide channels show up only when they join.
 
-- classic ESP32 only sees 2.4GHz. 5GHz devices just never show up, no
-  matter the channel settings - that's the chip, not the firmware
-- only handles normal data frames, not WDS
-- everything is in memory, restart wipes it
-- no vendor/OUI lookup
-
-## Note
-
-Only point this at your own stuff. Beacons are public broadcast so
-that's fine, but client MAC associations are metadata about other
-people's devices.
+Use it only on networks you own or are authorized to monitor.
