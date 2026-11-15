@@ -1,0 +1,115 @@
+:root {
+  --bg: #111;
+  --bg-alt: #1a1a1a;
+  --fg: #eee;
+  --muted: #888;
+  --dim: #666;
+  --border: #444;
+  --red: #e55;
+  --blue: #8ac;
+  --green: #6c6;
+  --tan: #ca8;
+  --yellow: #eb5;
+}
+
+body {
+  margin: 0;
+  padding: 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: monospace;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+/* scan controls */
+
+#scan-control {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  font-size: 0.9rem;
+}
+
+#scan-control select,
+#scan-control button {
+  padding: 2px 6px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  font-family: inherit;
+}
+
+#scan-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* node status */
+
+#nodes {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+#nodes .off {
+  color: var(--red);
+}
+
+/* access points */
+
+h2.section {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 1rem;
+}
+
+h3 {
+  margin: 1.2rem 0 0.3rem;
+}
+
+h3.ghost {
+  color: var(--muted);
+}
+
+.band   { color: var(--blue); }
+.count  { color: var(--green); }
+.vendor { color: var(--tan); font-weight: normal; }
+
+/* client tables */
+
+table {
+  width: 100%;
+  margin-bottom: 0.5rem;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+th {
+  background: var(--bg-alt);
+}
+
+tr.stale td { color: var(--dim); }
+.muted      { color: var(--dim); }
+.rand       { color: var(--red); }
+.joinonly   { color: var(--yellow); }

@@ -58,6 +58,6 @@ func newServer(store *Store, ctrl *Controller) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.Handle("/", http.FileServer(http.Dir("static")))
+	mux.Handle("/", http.FileServer(http.FS(staticFS())))
 	return mux
 }
